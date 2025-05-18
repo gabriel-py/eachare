@@ -8,11 +8,14 @@ peers = {}
 clock = 0
 
 
-def atualizar_relogio():
+def atualizar_relogio(clock_msg=None):
     global clock
+    if clock_msg is not None:
+        clock = max(clock, int(clock_msg))
     clock += 1
     print(f"=> Atualizando relogio para {clock}")
     return clock
+
 
 def enviar_mensagem(msg, destino):
     try:
