@@ -34,18 +34,25 @@ def tratar_mensagem(msg, origem):
     partes = msg.strip().split()
     if len(partes) < 3:
         return
-    remetente, _, tipo = partes[:3]
+    remetente, clock_msg, tipo = partes[:3]
     print(f"Mensagem recebida: \"{msg.strip()}\"")
-    atualizar_relogio()
+    atualizar_relogio(clock_msg)
+    clock_remetente = int(clock_msg)
 
-    if tipo == "HELLO":
-        peers[remetente] = "ONLINE"
-        print(f"Atualizando peer {remetente} status ONLINE")
-    elif tipo == "BYE":
-        peers[remetente] = "OFFLINE"
-        print(f"Atualizando peer {remetente} status OFFLINE")
-    elif tipo == "GET_PEERS":
-        peers[remetente] = "ONLINE"
+    if remetente not in peers:
+        peers[remetente] = ("ONLINE", clock_remetente)
+        print(f"Adicionando novo peer {remetente} status ONLINE")
+    else:
+        status_atual, relogio_atual = peers[remetente]
+        if tipo == "BYE":
+            peers[remetente] = ("OFFLINE", max(clock_remetente, relogio_atual))
+            print(f"Atualizando peer {remetente} status OFFLINE")
+        else:
+            if clock_remetente > relogio_atual:
+                peers[remetente] = ("ONLINE", clock_remetente)
+                print(f"Atualizando peer {remetente} status ONLINE")
+
+    if tipo == "GET_PEERS":
         enviar_peer_list(remetente)
     elif tipo == "PEER_LIST":
         qtd = int(partes[3])
@@ -53,16 +60,26 @@ def tratar_mensagem(msg, origem):
             info = partes[4 + i].split(":")
             addr = f"{info[0]}:{info[1]}"
             status = info[2]
-            if addr != origem:
-                if addr not in peers:
-                    peers[addr] = status
-                    print(f"Adicionando novo peer {addr} status {status}")
-                else:
-                    peers[addr] = status
+            relogio_recebido = int(info[3])
+
+            if addr == identidade:
+                continue
+
+            if addr not in peers:
+                peers[addr] = (status, relogio_recebido)
+                print(f"Adicionando novo peer {addr} status {status}")
+            else:
+                status_atual, relogio_atual = peers[addr]
+                if relogio_recebido > relogio_atual:
+                    peers[addr] = (status, relogio_recebido)
                     print(f"Atualizando peer {addr} status {status}")
 
 def enviar_peer_list(destino):
-    lista_peers = [f"{addr}:{status}:0" for addr, status in peers.items() if addr != destino]
+    lista_peers = [
+        f"{addr.split(':')[0]}:{addr.split(':')[1]}:{status}:{relogio}"
+        for addr, (status, relogio) in peers.items()
+        if addr != destino
+    ]
     msg = f"{identidade} {clock} PEER_LIST {len(lista_peers)} {' '.join(lista_peers)}\n"
     enviar_mensagem(msg, destino)
 
@@ -84,7 +101,7 @@ def tratar_conexao(conn):
 def listar_peers():
     print("Lista de peers:")
     print("[0] voltar para o menu anterior")
-    for i, (addr, status) in enumerate(peers.items(), 1):
+    for i, (addr, (status, _)) in enumerate(peers.items(), 1):
         print(f"[{i}] {addr} {status}")
     escolha = input(">")
     if escolha == "0":
@@ -95,10 +112,10 @@ def listar_peers():
         atualizar_relogio()
         msg = f"{identidade} {clock} HELLO\n"
         if enviar_mensagem(msg, destino):
-            peers[destino] = "ONLINE"
+            peers[destino] = ("ONLINE", clock)
         else:
-            peers[destino] = "OFFLINE"
-        print(f"Atualizando peer {destino} status {peers[destino]}")
+            peers[destino] = ("OFFLINE", clock)
+        print(f"Atualizando peer {destino} status {peers[destino][0]}")
     except:
         print("Escolha inválida")
 
@@ -107,10 +124,11 @@ def obter_peers():
         atualizar_relogio()
         msg = f"{identidade} {clock} GET_PEERS\n"
         if enviar_mensagem(msg, addr):
-            peers[addr] = "ONLINE"
+            peers[addr] = ("ONLINE", clock)
         else:
-            peers[addr] = "OFFLINE"
-        print(f"Atualizando peer {addr} status {peers[addr]}")
+            peers[addr] = ("OFFLINE", clock)
+        print(f"Atualizando peer {addr} status {peers[addr][0]}")
+
 
 def listar_arquivos():
     arquivos = os.listdir(diretorio)
@@ -118,7 +136,7 @@ def listar_arquivos():
         print(a)
 
 def sair():
-    for addr, status in peers.items():
+    for addr, (status, _) in peers.items():
         if status == "ONLINE":
             atualizar_relogio()
             msg = f"{identidade} {clock} BYE\n"
@@ -143,12 +161,9 @@ if not os.path.isdir(diretorio):
 with open(arquivo_peers) as f:
     for linha in f:
         peer = linha.strip()
-        if peer:
-            if peer == identidade:
-                continue
-            status = "OFFLINE"
-            peers[peer] = status
-            print(f"Adicionando novo peer {peer} status {status}")
+        if peer and peer != identidade:
+            peers[peer] = ("OFFLINE", 0)
+            print(f"Adicionando novo peer {peer} status OFFLINE")
 
 threading.Thread(target=servidor_tcp, daemon=True).start()
 
