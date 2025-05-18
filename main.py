@@ -2,10 +2,12 @@ import socket
 import threading
 import os
 import sys
+import base64
+import time
 
-
-peers = {}
+peers = {}  # chave: "ip:porta", valor: (status, relogio)
 clock = 0
+arquivos_recebidos = {}  # peer -> lista de arquivos "nome:tamanho"
 
 
 def atualizar_relogio(clock_msg=None):
@@ -28,6 +30,7 @@ def enviar_mensagem(msg, destino):
         return True
     except:
         return False
+
 
 def tratar_mensagem(msg, origem):
     global peers
@@ -61,10 +64,8 @@ def tratar_mensagem(msg, origem):
             addr = f"{info[0]}:{info[1]}"
             status = info[2]
             relogio_recebido = int(info[3])
-
             if addr == identidade:
                 continue
-
             if addr not in peers:
                 peers[addr] = (status, relogio_recebido)
                 print(f"Adicionando novo peer {addr} status {status}")
@@ -73,12 +74,44 @@ def tratar_mensagem(msg, origem):
                 if relogio_recebido > relogio_atual:
                     peers[addr] = (status, relogio_recebido)
                     print(f"Atualizando peer {addr} status {status}")
+    elif tipo == "LS":
+        arquivos = os.listdir(diretorio)
+        arquivos_info = [f"{nome}:{os.path.getsize(os.path.join(diretorio, nome))}" for nome in arquivos]
+        atualizar_relogio()
+        msg = f"{identidade} {clock} LS_LIST {len(arquivos_info)} {' '.join(arquivos_info)}\n"
+        enviar_mensagem(msg, remetente)
+    elif tipo == "LS_LIST":
+        qtd = int(partes[3])
+        arquivos_recebidos[remetente] = partes[4:4+qtd]
+    elif tipo == "DL":
+        nome = partes[3]
+        try:
+            with open(os.path.join(diretorio, nome), "rb") as f:
+                conteudo = base64.b64encode(f.read()).decode()
+            atualizar_relogio()
+            msg = f"{identidade} {clock} FILE {nome} 0 0 {conteudo if conteudo else 'null'}\n"
+            enviar_mensagem(msg, remetente)
+        except:
+            print(f"Erro: arquivo {nome} não encontrado")
+    elif tipo == "FILE":
+        nome = partes[3]
+        if len(partes) < 7:
+            print("Erro: mensagem FILE inválida (sem conteúdo base64).")
+            return
+        conteudo = " ".join(partes[6:])
+        if conteudo == "null":
+            dados = b""
+        else:
+            dados = base64.b64decode(conteudo)
+        with open(os.path.join(diretorio, nome), "wb") as f:
+            f.write(dados)
+        print(f"Download do arquivo {nome} finalizado.")
+
 
 def enviar_peer_list(destino):
     lista_peers = [
         f"{addr.split(':')[0]}:{addr.split(':')[1]}:{status}:{relogio}"
-        for addr, (status, relogio) in peers.items()
-        if addr != destino
+        for addr, (status, relogio) in peers.items() if addr != destino
     ]
     msg = f"{identidade} {clock} PEER_LIST {len(lista_peers)} {' '.join(lista_peers)}\n"
     enviar_mensagem(msg, destino)
@@ -92,9 +125,10 @@ def servidor_tcp():
         conn, addr = srv.accept()
         threading.Thread(target=tratar_conexao, args=(conn,)).start()
 
+
 def tratar_conexao(conn):
     with conn:
-        msg = conn.recv(1024).decode()
+        msg = conn.recv(1024 * 64).decode()
         tratar_mensagem(msg, identidade)
 
 
@@ -103,7 +137,7 @@ def listar_peers():
     print("[0] voltar para o menu anterior")
     for i, (addr, (status, _)) in enumerate(peers.items(), 1):
         print(f"[{i}] {addr} {status}")
-    escolha = input(">")
+    escolha = input("> ")
     if escolha == "0":
         return
     try:
@@ -118,6 +152,7 @@ def listar_peers():
         print(f"Atualizando peer {destino} status {peers[destino][0]}")
     except:
         print("Escolha inválida")
+
 
 def obter_peers():
     for addr in peers:
@@ -134,6 +169,40 @@ def listar_arquivos():
     arquivos = os.listdir(diretorio)
     for a in arquivos:
         print(a)
+
+
+def buscar_arquivos():
+    global arquivos_recebidos
+    arquivos_recebidos = {}
+    for peer, (status, _) in peers.items():
+        if status == "ONLINE":
+            atualizar_relogio()
+            msg = f"{identidade} {clock} LS\n"
+            enviar_mensagem(msg, peer)
+    time.sleep(2)
+    todos_arquivos = []
+    for peer, lista in arquivos_recebidos.items():
+        for entrada in lista:
+            nome, tamanho = entrada.split(":")
+            todos_arquivos.append((nome, tamanho, peer))
+    print("\nArquivos encontrados na rede:")
+    print("Nome | Tamanho | Peer")
+    print("[0] <Cancelar>")
+    for i, (nome, tam, peer) in enumerate(todos_arquivos, 1):
+        print(f"[{i}] {nome} | {tam} | {peer}")
+    escolha = input("Digite o numero do arquivo para fazer o download:\n> ")
+    if escolha == "0":
+        return
+    try:
+        idx = int(escolha) - 1
+        nome, _, peer = todos_arquivos[idx]
+        print(f"arquivo escolhido {nome}")
+        atualizar_relogio()
+        msg = f"{identidade} {clock} DL {nome} 0 0\n"
+        enviar_mensagem(msg, peer)
+    except:
+        print("Escolha inválida.")
+
 
 def sair():
     for addr, (status, _) in peers.items():
@@ -178,13 +247,15 @@ Escolha um comando:
 [6] Alterar tamanho de chunk
 [9] Sair
 """)
-    cmd = input(">")
+    cmd = input("> ")
     if cmd == "1":
         listar_peers()
     elif cmd == "2":
         obter_peers()
     elif cmd == "3":
         listar_arquivos()
+    elif cmd == "4":
+        buscar_arquivos()
     elif cmd == "9":
         sair()
     else:
