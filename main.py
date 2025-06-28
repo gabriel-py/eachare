@@ -4,6 +4,9 @@ import os
 import sys
 import base64
 import time
+import statistics
+
+estatisticas = {} # chave = (chunk_size, n_peers, tam_arquivo), valor = [tempos]
 
 peers = {}  # chave: "ip:porta", valor: (status, relogio)
 clock = 0
@@ -185,8 +188,9 @@ def listar_arquivos():
 
 
 def buscar_arquivos():
-    global arquivos_recebidos
+    global arquivos_recebidos, estatisticas
     arquivos_recebidos = {}
+
     for peer, (status, _) in peers.items():
         if status == "ONLINE":
             atualizar_relogio()
@@ -194,7 +198,6 @@ def buscar_arquivos():
             enviar_mensagem(msg, peer)
     time.sleep(2)
 
-    # Agrupar arquivos por (nome, tamanho)
     agrupados = {}  # chave: (nome, tamanho), valor: set(peers)
     for peer, lista in arquivos_recebidos.items():
         for entrada in lista:
@@ -220,7 +223,8 @@ def buscar_arquivos():
         nome, tamanho, peers_disponiveis = opcoes[idx]
         print(f"arquivo escolhido {nome}")
 
-        # Criar estrutura para receber os chunks
+        inicio = time.time()
+
         chunks = [None] * ((tamanho + tamanho_chunk - 1) // tamanho_chunk)
         threads = []
 
@@ -230,7 +234,6 @@ def buscar_arquivos():
             msg = f"{identidade} {clock} DL {nome} {tamanho_chunk} {chunk_index}\n"
             enviar_mensagem(msg, peer)
 
-        # Distribuir os chunks entre os peers (round-robin)
         for i in range(len(chunks)):
             peer = peers_disponiveis[i % len(peers_disponiveis)]
             t = threading.Thread(target=baixar_chunk, args=(peer, i))
@@ -240,8 +243,27 @@ def buscar_arquivos():
         for t in threads:
             t.join()
 
-        # Esperar um pouco para garantir recebimento dos FILEs
         time.sleep(2)
+
+        if nome in arquivos_recebidos and isinstance(arquivos_recebidos[nome], dict):
+            recebidos = arquivos_recebidos[nome]
+            if len(recebidos) == len(chunks):
+                with open(os.path.join(diretorio, nome), "wb") as f:
+                    for i in range(len(chunks)):
+                        f.write(recebidos[i])
+                print(f"Download do arquivo {nome} finalizado.")
+
+                fim = time.time()
+                duracao = fim - inicio
+
+                chave = (tamanho_chunk, len(peers_disponiveis), tamanho)
+                if chave not in estatisticas:
+                    estatisticas[chave] = []
+                estatisticas[chave].append(duracao)
+            else:
+                print("Erro: nem todos os chunks foram recebidos.")
+        else:
+            print("Erro: chunks não recebidos corretamente.")
     except:
         print("Escolha inválida.")
 
@@ -257,6 +279,15 @@ def alterar_tamanho_chunk():
         print(f"Tamanho de chunk alterado: {tamanho_chunk}")
     except ValueError:
         print("Entrada inválida.")
+
+
+def exibir_estatisticas():
+    print("\nTam. chunk | N peers | Tam. arquivo | N | Tempo [s] | Desvio")
+    for (chunk, n_peers, tam), tempos in estatisticas.items():
+        n = len(tempos)
+        media = sum(tempos) / n
+        desvio = statistics.stdev(tempos) if n > 1 else 0
+        print(f"{chunk:^11} | {n_peers:^7} | {tam:^12} | {n:^3} | {media:.5f} | {desvio:.5f}")
 
 
 def sair():
@@ -311,6 +342,8 @@ Escolha um comando:
         listar_arquivos()
     elif cmd == "4":
         buscar_arquivos()
+    elif cmd == "5":
+        exibir_estatisticas()
     elif cmd == "6":
         alterar_tamanho_chunk()
     elif cmd == "9":
