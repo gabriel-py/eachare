@@ -9,6 +9,7 @@ peers = {}  # chave: "ip:porta", valor: (status, relogio)
 clock = 0
 arquivos_recebidos = {}  # peer -> lista de arquivos "nome:tamanho"
 
+tamanho_chunk = 256
 
 def atualizar_relogio(clock_msg=None):
     global clock
@@ -85,27 +86,39 @@ def tratar_mensagem(msg, origem):
         arquivos_recebidos[remetente] = partes[4:4+qtd]
     elif tipo == "DL":
         nome = partes[3]
+        chunk_size = int(partes[4])
+        chunk_index = int(partes[5])
         try:
             with open(os.path.join(diretorio, nome), "rb") as f:
-                conteudo = base64.b64encode(f.read()).decode()
+                f.seek(chunk_index * chunk_size)
+                dados = f.read(chunk_size)
+                conteudo = base64.b64encode(dados).decode()
             atualizar_relogio()
-            msg = f"{identidade} {clock} FILE {nome} 0 0 {conteudo if conteudo else 'null'}\n"
+            msg = f"{identidade} {clock} FILE {nome} {chunk_size} {chunk_index} {conteudo}\n"
             enviar_mensagem(msg, remetente)
         except:
-            print(f"Erro: arquivo {nome} não encontrado")
+            print(f"Erro ao ler chunk {chunk_index} do arquivo {nome}")
     elif tipo == "FILE":
         nome = partes[3]
-        if len(partes) < 7:
-            print("Erro: mensagem FILE inválida (sem conteúdo base64).")
-            return
+        chunk_size = int(partes[4])
+        chunk_index = int(partes[5])
         conteudo = " ".join(partes[6:])
         if conteudo == "null":
             dados = b""
         else:
             dados = base64.b64decode(conteudo)
-        with open(os.path.join(diretorio, nome), "wb") as f:
-            f.write(dados)
-        print(f"Download do arquivo {nome} finalizado.")
+
+        if nome not in arquivos_recebidos:
+            arquivos_recebidos[nome] = {}
+        arquivos_recebidos[nome][chunk_index] = dados
+
+        chunks_recebidos = arquivos_recebidos[nome]
+        total_chunks = max(chunks_recebidos.keys()) + 1
+        if len(chunks_recebidos) == total_chunks:
+            with open(os.path.join(diretorio, nome), "wb") as f:
+                for i in range(total_chunks):
+                    f.write(chunks_recebidos[i])
+            print(f"Download do arquivo {nome} finalizado.")
 
 
 def enviar_peer_list(destino):
@@ -180,28 +193,70 @@ def buscar_arquivos():
             msg = f"{identidade} {clock} LS\n"
             enviar_mensagem(msg, peer)
     time.sleep(2)
-    todos_arquivos = []
+
+    # Agrupar arquivos por (nome, tamanho)
+    agrupados = {}  # chave: (nome, tamanho), valor: set(peers)
     for peer, lista in arquivos_recebidos.items():
         for entrada in lista:
             nome, tamanho = entrada.split(":")
-            todos_arquivos.append((nome, tamanho, peer))
+            chave = (nome, tamanho)
+            if chave not in agrupados:
+                agrupados[chave] = set()
+            agrupados[chave].add(peer)
+
     print("\nArquivos encontrados na rede:")
     print("Nome | Tamanho | Peer")
     print("[0] <Cancelar>")
-    for i, (nome, tam, peer) in enumerate(todos_arquivos, 1):
-        print(f"[{i}] {nome} | {tam} | {peer}")
+    opcoes = []
+    for i, ((nome, tamanho), peers_set) in enumerate(agrupados.items(), 1):
+        print(f"[{i}] {nome} | {tamanho} | {', '.join(peers_set)}")
+        opcoes.append((nome, int(tamanho), list(peers_set)))
+
     escolha = input("Digite o numero do arquivo para fazer o download:\n> ")
     if escolha == "0":
         return
     try:
         idx = int(escolha) - 1
-        nome, _, peer = todos_arquivos[idx]
+        nome, tamanho, peers_disponiveis = opcoes[idx]
         print(f"arquivo escolhido {nome}")
-        atualizar_relogio()
-        msg = f"{identidade} {clock} DL {nome} 0 0\n"
-        enviar_mensagem(msg, peer)
+
+        # Criar estrutura para receber os chunks
+        chunks = [None] * ((tamanho + tamanho_chunk - 1) // tamanho_chunk)
+        threads = []
+
+        def baixar_chunk(peer, chunk_index):
+            global clock
+            atualizar_relogio()
+            msg = f"{identidade} {clock} DL {nome} {tamanho_chunk} {chunk_index}\n"
+            enviar_mensagem(msg, peer)
+
+        # Distribuir os chunks entre os peers (round-robin)
+        for i in range(len(chunks)):
+            peer = peers_disponiveis[i % len(peers_disponiveis)]
+            t = threading.Thread(target=baixar_chunk, args=(peer, i))
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        # Esperar um pouco para garantir recebimento dos FILEs
+        time.sleep(2)
     except:
         print("Escolha inválida.")
+
+
+def alterar_tamanho_chunk():
+    global tamanho_chunk
+    try:
+        novo_valor = int(input("Digite novo tamanho de chunk:\n> "))
+        if novo_valor <= 0:
+            print("Valor inválido. Deve ser maior que 0.")
+            return
+        tamanho_chunk = novo_valor
+        print(f"Tamanho de chunk alterado: {tamanho_chunk}")
+    except ValueError:
+        print("Entrada inválida.")
 
 
 def sair():
@@ -256,6 +311,8 @@ Escolha um comando:
         listar_arquivos()
     elif cmd == "4":
         buscar_arquivos()
+    elif cmd == "6":
+        alterar_tamanho_chunk()
     elif cmd == "9":
         sair()
     else:
